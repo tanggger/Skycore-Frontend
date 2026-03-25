@@ -1,0 +1,72 @@
+/* ═══════════════════════════════════════════════════
+   翼网全境 Wing-Net Omni — Design System Tokens
+   军用/重工级数字基建指挥舱 (Nebula Dark Theme)
+   ═══════════════════════════════════════════════════ */
+
+:root {
+  /* ── 主题底色 ── */
+  --bg-deep:        #040714;
+  --bg-primary:     #0a0e27;
+  --bg-secondary:   #0f1535;
+  --bg-panel:       rgba(10, 14, 39, 0.85);
+  --bg-card:        rgba(15, 21, 53, 0.75);
+  --bg-hover:       rgba(0, 242, 255, 0.06);
+
+  /* ── 毛玻璃 Glassmorphism ── */
+  --glass-bg:       rgba(10, 14, 39, 0.65);
+  --glass-border:   rgba(0, 242, 255, 0.12);
+  --glass-blur:     20px;
+  --glass-shadow:   0 8px 32px rgba(0, 0, 0, 0.45);
+
+  /* ── 状态配色 ── */
+  --cyan:           #00f2ff;
+  --cyan-dim:       rgba(0, 242, 255, 0.3);
+  --cyan-glow:      0 0 20px rgba(0, 242, 255, 0.4);
+  --green:          #00ff88;
+  --green-dim:      rgba(0, 255, 136, 0.3);
+  --green-glow:     0 0 20px rgba(0, 255, 136, 0.4);
+  --orange:         #ffaa00;
+  --orange-dim:     rgba(255, 170, 0, 0.3);
+  --orange-glow:    0 0 20px rgba(255, 170, 0, 0.4);
+  --red:            #ff3b3b;
+  --red-dim:        rgba(255, 59, 59, 0.3);
+  --red-glow:       0 0 20px rgba(255, 59, 59, 0.5);
+
+  /* ── 辅助色 ── */
+  --purple:         #a855f7;
+  --purple-dim:     rgba(168, 85, 247, 0.3);
+  --blue:           #3b82f6;
+  --yellow:         #fbbf24;
+
+  /* ── 文字 ── */
+  --text-primary:   #e2e8f0;
+  --text-secondary: #94a3b8;
+  --text-dim:       #64748b;
+  --text-cyan:      #00f2ff;
+
+  /* ── 字体 ── */
+  /* 统一使用 JetBrains Mono 以保持风格一致，同时保留变量名以便未来可能得调整 */
+  --font-display:   'JetBrains Mono', 'Noto Sans SC', monospace;
+  /* JetBrains Mono 用于代码/数据，中文回退到 Noto Sans SC */
+  --font-mono:      'JetBrains Mono', 'Noto Sans SC', monospace;
+  /* 正文首选 Noto Sans SC 覆盖中英文，确保主要阅读体验的一致性 */
+  --font-body:      'Noto Sans SC', 'Segoe UI', sans-serif;
+
+  /* ── 圆角 ── */
+  --radius-sm:      6px;
+  --radius-md:      10px;
+  --radius-lg:      16px;
+  --radius-xl:      24px;
+
+  /* ── 过渡 ── */
+  --transition-fast:   0.15s ease;
+  --transition-normal: 0.3s ease;
+  --transition-slow:   0.6s ease;
+
+  /* ── 间距 ── */
+  --gap-xs:   4px;
+  --gap-sm:   8px;
+  --gap-md:   16px;
+  --gap-lg:   24px;
+  --gap-xl:   32px;
+}
