@@ -27,6 +27,23 @@ const ncAttackEvents = computed(() => workspaceData.nonCooperative?.attack?.even
 const ncAttackEffectMetrics = computed(() => workspaceData.nonCooperative?.attack?.effect_metrics || [])
 const ncAttackSummary = computed(() => workspaceData.nonCooperative?.attack?.summary)
 const hasAttackResults = computed(() => !!(ncAttackPlan.value || ncAttackEvents.value.length > 0 || ncAttackEffectMetrics.value.length > 0))
+const ncInferChartData = computed(() => {
+  return ncKeyNodes.value
+    .slice(0, 5)
+    .map((item, index) => ({
+      label: `Node ${item.nodeId ?? index + 1}`,
+      value: Number(((item.score ?? 0) * 100).toFixed(2))
+    }))
+})
+const ncAttackEffectSeries = computed(() => {
+  return ncAttackEffectMetrics.value
+    .map(item => ({
+      time: Number(item.time),
+      connectivity: Number(((item.connectivityRatio ?? 0) * 100).toFixed(2))
+    }))
+    .filter(item => Number.isFinite(item.time) && Number.isFinite(item.connectivity))
+    .sort((a, b) => a.time - b.time)
+})
 
 /** 格式化 null 安全的时间值，避免将 null 显示为 0 */
 function fmtTime(v: number | null | undefined): string {
@@ -372,11 +389,28 @@ function updateCharts() {
     if (pdrChart) pdrChart.setOption(makeLineOption('PDR脉搏线 (%)', '#00f2ff', pdrHistory.value, tickLabels.value, '%', [0, 100]))
     if (tpChart) tpChart.setOption(makeLineOption('吞吐量波浪 (Mbps)', '#a855f7', tpHistory.value, tickLabels.value, 'M'))
   } else {
-    // Mock data for non_cooperative displays
-    const confData = [95, 88, 76, 62, 54]
-    const nodeLabels = ['UAV-01', 'UAV-07', 'UAV-12', 'UAV-03', 'UAV-04']
-    if (inferConfChart) inferConfChart.setOption(makeBarOption('推断核心节点可信度 (%)', '#facc15', nodeLabels, confData))
-    if (attackEffectChart) attackEffectChart.setOption(makeLineOption('打击效能评估 (连通率下降)', '#ff3b3b', pdrHistory.value.map(v => v * 0.4), tickLabels.value, '%', [0, 100]))
+    if (inferConfChart) {
+      inferConfChart.setOption(
+        makeBarOption(
+          '推断核心节点可信度 (%)',
+          '#facc15',
+          ncInferChartData.value.map(item => item.label),
+          ncInferChartData.value.map(item => item.value)
+        )
+      )
+    }
+    if (attackEffectChart) {
+      attackEffectChart.setOption(
+        makeLineOption(
+          '打击效能评估 (连通率)',
+          '#ff3b3b',
+          ncAttackEffectSeries.value.map(item => item.connectivity),
+          ncAttackEffectSeries.value.map(item => item.time),
+          '%',
+          [0, 100]
+        )
+      )
+    }
   }
 }
 
@@ -420,6 +454,7 @@ onBeforeUnmount(() => {
 })
 
 watch(frame, updateCharts, { deep: true })
+watch([ncKeyNodes, ncAttackEffectMetrics, currentAppMode], updateCharts, { deep: true })
 </script>
 
 <template>

@@ -1,7 +1,5 @@
-import type { BuildingBlock, FrameData, UAVNode, GeoJsonMapData, FrontendResponse } from '../types'
+import type { BuildingBlock, FrameData, UAVNode, GeoJsonMapData, FrontendResponse, FrontendResponseData } from '../types'
 import type { FormationType } from '../data/mockData'
-import { generateMockFrames } from '../data/mockData'
-import { loadCSVFrames } from './csvParser'
 import { GEOMETRIC_CONFLICT_DISTANCE_M, resolveConflictState } from '../utils/conflict'
 
 // ── 合作模式专用配置字段 ──
@@ -72,6 +70,105 @@ export interface SimulationConfig extends CustomSimulationParams, CooperativeCon
 }
 
 const BASE_URL = 'http://localhost:5000';
+
+function isEmptyValue(value: unknown): boolean {
+    if (value === null || value === undefined) return true;
+    if (typeof value === 'string') return value.trim().length === 0;
+    if (Array.isArray(value)) return value.length === 0;
+    return false;
+}
+
+function getValueAtPath(obj: any, path: string): unknown {
+    return path.split('.').reduce((acc: any, key) => acc?.[key], obj);
+}
+
+function collectMissingFields(payload: any, paths: string[]): string[] {
+    const missing: string[] = [];
+    for (const path of paths) {
+        if (isEmptyValue(getValueAtPath(payload, path))) {
+            missing.push(path);
+        }
+    }
+    return missing;
+}
+
+function formatMissingFieldsError(paths: string[]): never {
+    throw new Error(
+        `后端返回的数据不完整，缺少以下字段：\n${paths.map(path => `- ${path}`).join('\n')}`
+    );
+}
+
+function validateFrontendPayload(
+    payload: FrontendResponseData | undefined,
+    config: SimulationConfig
+): FrontendResponseData {
+    if (!payload) {
+        throw new Error('后端没有返回 data 字段，无法完成前后端对接。');
+    }
+
+    const requiredCommon = [
+        'meta.taskId',
+        'meta.operationMode',
+        'meta.sceneType',
+        'meta.difficulty',
+        'meta.formation',
+        'shared.positions',
+        'shared.qos',
+        'shared.topology_evolution',
+        'shared.topology_links',
+        'shared.transmissions',
+        'shared.resource_detailed'
+    ];
+
+    const requiredCooperative = [
+        'cooperative.mode_summary',
+        'cooperative.dashboard_snapshot',
+        'cooperative.failure_timeline.events',
+        'cooperative.recovery_timeline.actions',
+        'cooperative.metrics_timeseries.samples'
+    ];
+
+    const requiredNonCooperative = [
+        'non_cooperative.observation_inference.observed_signal_events',
+        'non_cooperative.observation_inference.observed_comm_windows',
+        'non_cooperative.observation_inference.observed_link_evidence',
+        'non_cooperative.observation_inference.inferred_topology_edges',
+        'non_cooperative.observation_inference.inferred_graph_nodes',
+        'non_cooperative.observation_inference.key_node_candidates'
+    ];
+
+    const requiredAttack = [
+        'non_cooperative.attack.recommendations',
+        'non_cooperative.attack.plan',
+        'non_cooperative.attack.events',
+        'non_cooperative.attack.target_binding',
+        'non_cooperative.attack.effect_metrics',
+        'non_cooperative.attack.summary'
+    ];
+
+    const missing = collectMissingFields(payload, requiredCommon);
+
+    if (payload.meta.operationMode !== config.operationMode) {
+        missing.push(`meta.operationMode (expected ${config.operationMode}, got ${payload.meta.operationMode})`);
+    }
+
+    if (config.operationMode === 'cooperative') {
+        missing.push(...collectMissingFields(payload, requiredCooperative));
+    }
+
+    if (config.operationMode === 'non_cooperative') {
+        missing.push(...collectMissingFields(payload, requiredNonCooperative));
+        if (config.enableNonCooperativeAttack) {
+            missing.push(...collectMissingFields(payload, requiredAttack));
+        }
+    }
+
+    if (missing.length > 0) {
+        formatMissingFieldsError(Array.from(new Set(missing)));
+    }
+
+    return payload;
+}
 
 /**
  * Parses the raw JSON response from the backend into a FrameData array
@@ -535,16 +632,20 @@ export const apiService = {
                             clearInterval(timer)
                             console.log("[WingNet API] 🎉 数据结算完成！")
 
-                            const rawData = pollData.data
+                            const rawData = validateFrontendPayload(pollData.data, config)
                             // 解析帧数据（从 shared 或直接从 data）
-                            const frameSource = rawData?.shared ? rawData.shared : rawData
+                            const frameSource: any = rawData?.shared ? rawData.shared : rawData
                             let frames = parseBackendJSONToFrames(
                                 frameSource,
                                 config.swarm_size
                             )
 
+                            if (frames.length === 0) {
+                                throw new Error('后端返回成功，但无法解析出任何回放帧，请检查 shared.positions / shared.qos / shared.topology_evolution。')
+                            }
+
                             // 合并 resource_detailed
-                            const detailed = frameSource.resource_detailed || rawData?.resource_detailed || []
+                            const detailed = frameSource.resource_detailed || (rawData as any)?.resource_detailed || []
                             if (detailed.length > 0) {
                                 console.log(`[WingNet API] 注入 Detailed Resource Data: ${detailed.length} records`)
                                 frames = mergeDetailedIntoFrames(frames, detailed)
@@ -567,14 +668,8 @@ export const apiService = {
             })
 
         } catch (error) {
-            console.warn('[WingNet API] Backend unreachable, falling back to offline mock data mode:', error)
-            console.log("---------------- 🚀 MOCK DATA ACTIVATED 🚀 ----------------")
-            return new Promise((resolve) => {
-                setTimeout(() => {
-                    const mockFrames = generateMockFrames(config.formation || 'v_formation')
-                    resolve({ frames: mockFrames })
-                }, 800)
-            })
+            console.error('[WingNet API] Backend integration failed:', error)
+            throw error
         }
     },
 
