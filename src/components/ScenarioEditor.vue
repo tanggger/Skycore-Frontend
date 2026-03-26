@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onBeforeUnmount, watch } from 'vue'
 import * as THREE from 'three'
-import type { BuildingBlock, SceneConfig } from '../types'
+import type { BuildingBlock, SceneConfig, GeoJsonMapData, GeoJsonBuilding, GeoJsonPoint } from '../types'
 import { applyScene, clearScene, resetScene, activeScene, applyGeoJsonMap, switchToManualMode, geojsonMapData, geojsonMapName, sceneMode } from '../composables/useScene'
 import { apiService } from '../services/apiService'
+import { currentScene } from '../composables/useAppMode'
 
 const emit = defineEmits<{
   (e: 'close'): void
@@ -89,6 +90,138 @@ function handleSwitchToGeoJson() {
   editorTab.value = 'geojson'
 }
 
+// ── 本地 GeoJSON 解析（离线） ──
+async function parseLocalGeoJson(file: File): Promise<GeoJsonMapData> {
+  const text = await file.text()
+  const geojson = JSON.parse(text)
+
+  if (!geojson.features || !Array.isArray(geojson.features)) {
+    throw new Error('无效的 GeoJSON 文件：缺少 features 数组')
+  }
+
+  // 1. 收集所有坐标以确定边界和中心点
+  const allLngs: number[] = []
+  const allLats: number[] = []
+
+  for (const feature of geojson.features) {
+    const geom = feature.geometry
+    if (!geom) continue
+    let coordSets: number[][][] = []
+    if (geom.type === 'Polygon') {
+      coordSets = geom.coordinates as number[][][]
+    } else if (geom.type === 'MultiPolygon') {
+      for (const poly of geom.coordinates as number[][][][]) {
+        coordSets.push(...poly)
+      }
+    } else {
+      continue
+    }
+    for (const ring of coordSets) {
+      for (const pt of ring) {
+        allLngs.push(pt[0])
+        allLats.push(pt[1])
+      }
+    }
+  }
+
+  if (allLngs.length === 0) {
+    throw new Error('GeoJSON 中未找到任何 Polygon/MultiPolygon 要素')
+  }
+
+  const minLng = Math.min(...allLngs)
+  const maxLng = Math.max(...allLngs)
+  const minLat = Math.min(...allLats)
+  const maxLat = Math.max(...allLats)
+  const avgLat = (minLat + maxLat) / 2
+
+  // 等距圆柱投影系数
+  const mPerDegLng = 111320 * Math.cos(avgLat * Math.PI / 180)
+  const mPerDegLat = 110540
+
+  const mapWidth = (maxLng - minLng) * mPerDegLng
+  const mapHeight = (maxLat - minLat) * mPerDegLat
+
+  // 2. 遍历每个 feature 生成建筑
+  const buildings: GeoJsonBuilding[] = []
+
+  for (const feature of geojson.features) {
+    const geom = feature.geometry
+    if (!geom) continue
+    const props = feature.properties || {}
+
+    // 只处理建筑类型
+    if (!props.building && !props['building:part']) continue
+
+    let polyCoords: number[][][][] = []
+    if (geom.type === 'Polygon') {
+      polyCoords = [geom.coordinates as number[][][]]
+    } else if (geom.type === 'MultiPolygon') {
+      polyCoords = geom.coordinates as number[][][][]
+    } else {
+      continue
+    }
+
+    // 提取高度（OSM 数据多数建筑缺少高度标注，默认取 35m 以构成有效障碍）
+    let height = 35 // 默认高度
+    if (props.height) {
+      const h = parseFloat(props.height)
+      if (!isNaN(h) && h > 0) height = h
+    } else if (props['building:levels']) {
+      const levels = parseFloat(props['building:levels'])
+      if (!isNaN(levels) && levels > 0) height = levels * 3.5 // 每层 3.5m
+    }
+
+    // 对高度施加竖向夸张系数，使建筑物在沙盘中形成有效遮挡
+    height *= 2.0
+
+    for (const polygon of polyCoords) {
+      const polygons: GeoJsonPoint[][] = []
+
+      for (const ring of polygon) {
+        const pts: GeoJsonPoint[] = []
+        for (const coord of ring) {
+          pts.push({
+            x: (coord[0] - minLng) * mPerDegLng,
+            y: (coord[1] - minLat) * mPerDegLat,
+          })
+        }
+        polygons.push(pts)
+      }
+
+      if (polygons.length > 0 && polygons[0].length >= 3) {
+        buildings.push({
+          zMax: height,
+          polygon: polygons[0],
+          polygons: polygons.length > 1 ? polygons : undefined,
+        })
+      }
+    }
+  }
+
+  if (buildings.length === 0) {
+    throw new Error('未在 GeoJSON 中找到有效的建筑物要素（需要含 building 属性的 Polygon）')
+  }
+
+  return { map_width: mapWidth, map_height: mapHeight, buildings }
+}
+
+async function handleLocalGeoJsonParse() {
+  if (!geojsonFile.value) { geojsonError.value = '请先选择 .geojson 文件'; return }
+  const mapName = geojsonInputMapName.value.trim() || geojsonFile.value.name.replace(/\.geojson$/i, '')
+  geojsonLoading.value = true
+  geojsonError.value = ''
+  geojsonSuccess.value = ''
+  try {
+    const data = await parseLocalGeoJson(geojsonFile.value)
+    applyGeoJsonMap(mapName, data)
+    geojsonSuccess.value = `✓ 本地解析完成：${data.buildings.length} 栋建筑 (${data.map_width.toFixed(0)}×${data.map_height.toFixed(0)} m)`
+  } catch (err: any) {
+    geojsonError.value = err.message || '本地解析失败'
+  } finally {
+    geojsonLoading.value = false
+  }
+}
+
 // Placement state
 const isPlacing = ref(false)
 
@@ -156,10 +289,15 @@ function initScene() {
   pointLight1.position.set(100, 100, 100)
   threeScene.add(pointLight1)
 
-  // Ground plane (invisible, for raycasting)
+  // Ground plane with scene-aware color
+  const isForest = currentScene.value === 'forest'
+  const isWild = currentScene.value === 'wild'
+  const gColor = isForest ? 0x051a0f : (isWild ? 0x1a1205 : 0x0a0e27)
+  const gGrid = isForest ? 0x00ff88 : (isWild ? 0xfacc15 : 0x00f2ff)
+
   const groundGeo = new THREE.PlaneGeometry(GRID, GRID)
   const groundMat = new THREE.MeshStandardMaterial({
-    color: 0x0a0e27, roughness: 0.9, metalness: 0.1,
+    color: gColor, roughness: 0.9, metalness: 0.1,
   })
   groundPlane = new THREE.Mesh(groundGeo, groundMat)
   groundPlane.rotation.x = -Math.PI / 2
@@ -168,7 +306,7 @@ function initScene() {
   threeScene.add(groundPlane)
 
   // Grid
-  gridHelper = new THREE.GridHelper(GRID, 12, 0x00f2ff, 0x00f2ff)
+  gridHelper = new THREE.GridHelper(GRID, 12, gGrid, gGrid)
   gridHelper.position.set(GRID / 2, 0, GRID / 2)
   ;(gridHelper.material as THREE.Material).opacity = 0.08
   ;(gridHelper.material as THREE.Material).transparent = true
@@ -176,7 +314,7 @@ function initScene() {
 
   // Border
   const borderGeo = new THREE.EdgesGeometry(new THREE.BoxGeometry(GRID, 0.5, GRID))
-  const borderMat = new THREE.LineBasicMaterial({ color: 0x00f2ff, transparent: true, opacity: 0.15 })
+  const borderMat = new THREE.LineBasicMaterial({ color: gGrid, transparent: true, opacity: 0.15 })
   const borderLine = new THREE.LineSegments(borderGeo, borderMat)
   borderLine.position.set(GRID / 2, 0, GRID / 2)
   threeScene.add(borderLine)
@@ -320,36 +458,112 @@ function createGeoJsonBuildings() {
 }
 
 function addBuildingMesh(b: BuildingBlock) {
-  const h = b.height * 0.8
-  const geo = new THREE.BoxGeometry(b.width, h, b.depth)
+  const isForest = currentScene.value === 'forest'
+  const isWild = currentScene.value === 'wild'
+  const h = b.height
+  const visualScale = (isForest || isWild) ? 2.5 : 1.0
+  const renderH = h * visualScale
+
+  const bColor = isForest ? 0x0a2618 : (isWild ? 0x261a0a : 0x0a1128)
+  const eColor = isForest ? 0x00ff88 : (isWild ? 0xfacc15 : 0x00f2ff)
+
   const mat = new THREE.MeshPhysicalMaterial({
-    color: 0x0a1128,
-    emissive: 0x001133,
-    roughness: 0.1,
-    metalness: 0.8,
-    clearcoat: 1.0,
+    color: bColor,
+    emissive: isForest || isWild ? 0x000000 : 0x001133,
+    roughness: isForest || isWild ? 0.9 : 0.1,
+    metalness: isForest || isWild ? 0.05 : 0.8,
+    clearcoat: isForest || isWild ? 0.0 : 1.0,
     clearcoatRoughness: 0.1,
     transparent: true,
-    opacity: 0.9,
+    opacity: isForest || isWild ? 1.0 : 0.9,
   })
-  const mesh = new THREE.Mesh(geo, mat)
-  mesh.position.set(b.x + b.width / 2, h / 2, b.y + b.depth / 2)
-  mesh.castShadow = true
-  mesh.receiveShadow = true
-  sceneGroup.add(mesh)
+  const edgeMat = new THREE.LineBasicMaterial({
+    color: eColor, transparent: true, opacity: 0.25,
+  })
 
-  // Wireframe edges
-  const edgeGeo = new THREE.EdgesGeometry(geo)
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0x00f2ff, transparent: true, opacity: 0.25 })
-  const edges = new THREE.LineSegments(edgeGeo, edgeMat)
-  edges.position.copy(mesh.position)
-  sceneGroup.add(edges)
+  if (isForest) {
+    // Tree: trunk + 3 layered cones
+    const trunkH = Math.max(8, renderH * 0.2)
+    const trunkGeo = new THREE.CylinderGeometry(2, 3, trunkH, 8)
+    const trunk = new THREE.Mesh(trunkGeo, mat)
+    trunk.scale.set(1, 1, 1)
+    trunk.position.set(b.x + b.width / 2, trunkH / 2, b.y + b.depth / 2)
+    trunk.castShadow = true
+    sceneGroup.add(trunk)
 
-  // Height label
-  const labelSprite = createTextSprite(`${Math.round(b.height)}m`, '#00f2ff')
-  labelSprite.position.set(b.x + b.width / 2, h + 8, b.y + b.depth / 2)
-  labelSprite.scale.set(20, 10, 1)
-  sceneGroup.add(labelSprite)
+    const leafMat = mat.clone()
+    leafMat.color.setHex(0x0a3318)
+    const leavesGeo = new THREE.ConeGeometry(1, 1, 8)
+
+    for (let i = 0; i < 3; i++) {
+      const leafH = renderH * 0.4
+      const leafW = b.width * (1 - i * 0.25)
+      const leaves = new THREE.Mesh(leavesGeo, leafMat)
+      leaves.scale.set(leafW, leafH, leafW)
+      leaves.position.set(b.x + b.width / 2, trunkH + i * (leafH * 0.5) + leafH / 2, b.y + b.depth / 2)
+      leaves.castShadow = true
+      sceneGroup.add(leaves)
+      // edges
+      const edgeG = new THREE.EdgesGeometry(leavesGeo)
+      const edgesM = new THREE.LineSegments(edgeG, edgeMat)
+      edgesM.scale.copy(leaves.scale)
+      edgesM.position.copy(leaves.position)
+      sceneGroup.add(edgesM)
+    }
+
+    // Height label
+    const labelSprite = createTextSprite(`${Math.round(h)}m`, '#00ff88')
+    labelSprite.position.set(b.x + b.width / 2, renderH + 8, b.y + b.depth / 2)
+    labelSprite.scale.set(20, 10, 1)
+    sceneGroup.add(labelSprite)
+
+  } else if (isWild) {
+    // Low-poly hill
+    const r = Math.max(b.width, b.depth) * 1.5
+    const segs = 4 + Math.floor(Math.abs(Math.sin(b.x * 0.1)) * 3)
+    const hillGeo = new THREE.ConeGeometry(r, renderH, segs)
+    const hillMat = mat.clone()
+    hillMat.color.setHex(0x2a1d10)
+    hillMat.flatShading = true
+    hillMat.roughness = 1.0
+    const hill = new THREE.Mesh(hillGeo, hillMat)
+    hill.rotation.y = Math.abs(Math.sin(b.y * 0.07)) * Math.PI
+    hill.position.set(b.x + b.width / 2, renderH / 2, b.y + b.depth / 2)
+    hill.castShadow = true
+    hill.receiveShadow = true
+    sceneGroup.add(hill)
+    const edgeG = new THREE.EdgesGeometry(hillGeo)
+    const edgesM = new THREE.LineSegments(edgeG, edgeMat)
+    edgesM.rotation.y = hill.rotation.y
+    edgesM.position.copy(hill.position)
+    sceneGroup.add(edgesM)
+
+    // Height label
+    const labelSprite = createTextSprite(`${Math.round(h)}m`, '#facc15')
+    labelSprite.position.set(b.x + b.width / 2, renderH + 8, b.y + b.depth / 2)
+    labelSprite.scale.set(20, 10, 1)
+    sceneGroup.add(labelSprite)
+
+  } else {
+    // City/default: box
+    const geo = new THREE.BoxGeometry(b.width, renderH, b.depth)
+    const mesh = new THREE.Mesh(geo, mat)
+    mesh.position.set(b.x + b.width / 2, renderH / 2, b.y + b.depth / 2)
+    mesh.castShadow = true
+    mesh.receiveShadow = true
+    sceneGroup.add(mesh)
+
+    const edgeGeo = new THREE.EdgesGeometry(geo)
+    const edges = new THREE.LineSegments(edgeGeo, edgeMat)
+    edges.position.copy(mesh.position)
+    sceneGroup.add(edges)
+
+    // Height label
+    const labelSprite = createTextSprite(`${Math.round(b.height)}m`, '#00f2ff')
+    labelSprite.position.set(b.x + b.width / 2, renderH + 8, b.y + b.depth / 2)
+    labelSprite.scale.set(20, 10, 1)
+    sceneGroup.add(labelSprite)
+  }
 }
 
 function createTextSprite(text: string, color: string): THREE.Sprite {
@@ -516,6 +730,11 @@ watch([buildingWidth, buildingDepth, buildingHeight], () => {
 
 // Watch scene mode changes for GeoJSON preview
 watch([sceneMode, geojsonMapData], () => {
+  rebuildPlacedObjects()
+})
+
+// Watch scene type changes to rebuild terrain accordingly
+watch(currentScene, () => {
   rebuildPlacedObjects()
 })
 
@@ -776,14 +995,24 @@ onBeforeUnmount(() => {
               />
             </div>
 
-            <button
-              class="osm-action-btn"
-              :disabled="geojsonLoading"
-              @click="handleGeoJsonUpload"
-            >
-              <span v-if="geojsonLoading">⏳ 解析中...</span>
-              <span v-else>⬆️ 上传并解析</span>
-            </button>
+            <div class="osm-btn-row">
+              <button
+                class="osm-action-btn"
+                :disabled="geojsonLoading"
+                @click="handleGeoJsonUpload"
+              >
+                <span v-if="geojsonLoading">⏳ 解析中...</span>
+                <span v-else>⬆️ 上传并解析</span>
+              </button>
+              <button
+                class="osm-action-btn local-parse-btn"
+                :disabled="geojsonLoading"
+                @click="handleLocalGeoJsonParse"
+              >
+                <span v-if="geojsonLoading">⏳ 解析中...</span>
+                <span v-else>🖥 本地解析（离线）</span>
+              </button>
+            </div>
 
             <div class="osm-divider">或加载已有地图</div>
 
@@ -1121,6 +1350,22 @@ onBeforeUnmount(() => {
   border-color: var(--glass-border); color: var(--text-secondary);
 }
 .osm-action-btn.secondary:hover:not(:disabled) { border-color: var(--text-secondary); color: var(--text-primary); }
+
+.osm-btn-row {
+  display: flex; gap: 6px;
+}
+.osm-btn-row .osm-action-btn {
+  flex: 1;
+}
+.osm-action-btn.local-parse-btn {
+  background: linear-gradient(135deg, rgba(0,255,136,0.12), rgba(0,242,255,0.08));
+  border-color: #00ff88;
+  color: #00ff88;
+}
+.osm-action-btn.local-parse-btn:hover:not(:disabled) {
+  background: rgba(0,255,136,0.15);
+  box-shadow: 0 0 12px rgba(0,255,136,0.3);
+}
 
 .osm-feedback {
   padding: 6px 8px; border-radius: var(--radius-sm);

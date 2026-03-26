@@ -613,6 +613,12 @@ function handleExecuteAttack() {
     <div class="glass-panel uav-list-card">
       <div class="section-title">无人机实时状态</div>
       <div class="uav-scroll" id="uav-list">
+        <!-- 空状态提示 -->
+        <div v-if="uavList.length === 0" class="uav-empty-state">
+          <div class="uav-empty-icon">🚁</div>
+          <div class="uav-empty-text">请先启动仿真演练</div>
+          <div class="uav-empty-sub">运行结束后将实时显示各无人机遥测数据</div>
+        </div>
         <div
           v-for="(uav, idx) in uavList"
           :key="uav.id"
@@ -658,6 +664,8 @@ function handleExecuteAttack() {
 .sim-control-card {
   padding: 12px;
   flex-shrink: 0;
+  max-height: 42vh;
+  overflow-y: auto;
 }
 
 .control-form.compact {
@@ -948,7 +956,7 @@ input[type=number].glass-select {
 .uav-list-card {
   padding: 14px;
   flex: 1;
-  min-height: 0;
+  min-height: 160px;
   display: flex;
   flex-direction: column;
 }
@@ -959,6 +967,39 @@ input[type=number].glass-select {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-height: 0;
+}
+
+/* 空状态提示 */
+.uav-empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 20px 0;
+  opacity: 0.45;
+}
+
+.uav-empty-icon {
+  font-size: 28px;
+  filter: grayscale(0.5);
+}
+
+.uav-empty-text {
+  font-size: 11px;
+  color: var(--cyan);
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.uav-empty-sub {
+  font-size: 9px;
+  color: var(--text-dim);
+  text-align: center;
+  line-height: 1.5;
+  max-width: 160px;
 }
 
 /* ── 无人机遥测列表 ── */
