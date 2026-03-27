@@ -111,7 +111,6 @@ function validateFrontendPayload(
         'meta.operationMode',
         'meta.sceneType',
         'meta.difficulty',
-        'meta.formation',
         'shared.positions',
         'shared.qos',
         'shared.topology_evolution',
